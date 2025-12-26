@@ -1,0 +1,62 @@
+# Python cache and artifacts
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+*.env
+
+# IDE/editor configs
+.vscode/
+.idea/
+*.swp
+
+# Datasets and large data files
+data/
+datasets/
+*.csv
+*.tsv
+*.jsonl
+*.zip
+*.tar
+*.tar.gz
+
+# Model checkpoints, outputs, and logs
+checkpoints/
+models/
+outputs/
+logs/
+wandb/
+runs/
+
+# Training artifacts
+*.pt
+*.pth
+*.ckpt
+
+# Notebooks outputs
+.ipynb_checkpoints
+*.ipynb
+*.nbconvert.ipynb
+
+# OS and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+
+# Matplotlib or experiment figures
+figures/
+plots/
+*.png
+*.jpg
+
+# Hugging Face cache (if using datasets)
+~/.cache/
+~/.huggingface/
+huggingface_cache/
+cache/
