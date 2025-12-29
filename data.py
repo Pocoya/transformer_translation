@@ -1,128 +1,149 @@
-from collections import Counter
-from datasets import load_dataset
-from torch.utils.data import Dataset, DataLoader
 import torch
+from torch.utils.data import Dataset, DataLoader
+from datasets import load_dataset
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
+import os
 
-dataset = load_dataset("wmt/wmt14", "de-en")
 
-train_dataset = dataset["train"].select(range(100_000))
-val_dataset = dataset['validation']
-test_dataset = dataset['test'].select(range(2000))
+PAD_IDX = 0
+UNK_IDX = 1
+BOS_IDX = 2
+EOS_IDX = 3
 
-def clean(text):
+def clean_logic(text):
+    """
+    Cleans data: removes too short/long sentences, 
+    removes identical translations, and checks length ratios.
+    """
     src = text['translation']['de'].strip()
     tgt = text['translation']['en'].strip()
 
-    if 3 <= len(src.split()) <= 80 and 3 <= len(tgt.split()) <= 80:
-        return {'translation': {'de': src, 'en': tgt}}
-    return None
-
-
-class Tokenizer:
-    def __init__(self, vocab_size=16000):
-        self.vocab_size = vocab_size
-        self.word2idx = {}
-        self.idx2word = {}
+    # Length check
+    src_len = len(src.split())
+    tgt_len = len(tgt.split())
+    if not (3 <= src_len <= 80 and 3 <= tgt_len <= 80):
+        return False
     
-    def build_vocab(self, texts):
-        counter = Counter()
-        for text in texts:
-            counter.update(text.lower().split())
+    # Ratio check (prevents dirty data where one side is much longer)
+    if max(src_len, tgt_len) / min(src_len, tgt_len) > 2.5:
+        return False
         
-        vocab = ['<pad>', '<unk>', '<bos>', '<eos>'] + [word for word, _ in counter.most_common(self.vocab_size - 4)]
-        vocab = ['<pad>', '<unk>', '<bos>', '<eos>'] + [word for word, _ in counter.most_common(self.vocab_size - 4)]
+    # Identity check (prevents model learning to just copy input)
+    if src.lower() == tgt.lower():
+        return False
+        
+    return True
 
-        self.word2idx = {word: i for i, word in enumerate(vocab)}
-        self.idx2word = {i: word for word, i in self.word2idx.items()}
-    
+class FastBPETokenizer:
+    """Wrapper for the Rust-based BPE Tokenizer"""
+    def __init__(self, vocab_size=16000):
+        self.tokenizer = Tokenizer(BPE(unk_token="<unk>"))
+        self.tokenizer.pre_tokenizer = Whitespace()
+        self.vocab_size = vocab_size
 
-    def encode(self, text, max_len=80):
-        tokens = ['<bos>'] + text.lower().split() + ['<eos>']
-        ids = [self.word2idx.get(token, self.word2idx['<unk>']) for token in tokens]
-        if len(ids) < max_len:
-            ids += [self.word2idx['<pad>']] * (max_len - len(ids))
-        else:
-            ids = ids[:max_len]
-        return torch.tensor(ids)
+    def train(self, texts):
+        trainer = BpeTrainer(
+            vocab_size=self.vocab_size,
+            special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"]
+        )
+        self.tokenizer.train_from_iterator(texts, trainer)
+
+    def encode(self, text):
+        return self.tokenizer.encode(text).ids
 
     def decode(self, ids):
-        words = [self.idx2word[id.item()] for id in ids if id.item() not in [0, 2, 3]]
-        return ' '.join(words)
-    
+        # Filter out special tokens for clean output
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+        return self.tokenizer.decode([i for i in ids if i not in [PAD_IDX, BOS_IDX, EOS_IDX]])
 
-class Dataset(Dataset):
-    def __init__(self, dataset, src_tokenizer, tgt_tokenizer, max_len=80):
-        self.dataset = dataset
-        self.src_tokenizer = src_tokenizer
-        self.tgt_tokenizer = tgt_tokenizer
-        self.max_len = max_len
+class PreTokenizedDataset(Dataset):
+    def __init__(self, raw_dataset, src_tokenizer, tgt_tokenizer, max_len=80):
+        self.src_tensors = []
+        self.tgt_tensors = []
+
+        print(f"Tokenizing {len(raw_dataset)} samples...")
+        for item in raw_dataset:
+            # Encode
+            s_ids = src_tokenizer.encode(item['translation']['de'])
+            t_ids = tgt_tokenizer.encode(item['translation']['en'])
+
+            # Add BOS/EOS and truncate
+            s_ids = [BOS_IDX] + s_ids[:max_len-2] + [EOS_IDX]
+            t_ids = [BOS_IDX] + t_ids[:max_len-2] + [EOS_IDX]
+
+            # Pad
+            s_pad = s_ids + [PAD_IDX] * (max_len - len(s_ids))
+            t_pad = t_ids + [PAD_IDX] * (max_len - len(t_ids))
+
+            self.src_tensors.append(torch.tensor(s_pad, dtype=torch.long))
+            self.tgt_tensors.append(torch.tensor(t_pad, dtype=torch.long))
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.src_tensors)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        src_text = item['translation']['de']
-        tgt_text = item['translation']['en']
-
-        src_ids = self.src_tokenizer.encode(src_text, self.max_len)
-        tgt_ids = self.tgt_tokenizer.encode(tgt_text, self.max_len)
-
-        # Match target input and output, x[0] -> y[0] so x[0] != y[0]
-        # x: input from 0 to last -1 to always have a token to predict
-        # y: output from 1 to last to always predict the next token
+        src = self.src_tensors[idx]
+        tgt = self.tgt_tensors[idx]
+        
+        # tgt_input: <bos> I love cats <pad>
+        # tgt_output: I love cats <eos> <pad>
         return {
-            'src': src_ids,
-            'tgt_input': tgt_ids[:-1],
-            'tgt_output': tgt_ids[1:]
+            'src': src,
+            'tgt_input': tgt[:-1],
+            'tgt_output': tgt[1:]
         }
 
+def get_dataloaders(batch_size=256, max_len=80, vocab_size=16000):
+    print("Loading WMT14 dataset...")
+    raw_dataset = load_dataset("wmt/wmt14", "de-en")
+    
+    print("Filtering 500k samples...")
+    train_raw = raw_dataset["train"].select(range(500_000)).filter(clean_logic)
+    val_raw = raw_dataset['validation'].filter(clean_logic)
+    test_raw = raw_dataset['test'].select(range(2000)).filter(clean_logic)
 
-def get_dataloaders(batch_size=64, max_len=80):
-    print("Cleaning datasets...")
-    train_data = train_dataset.filter(clean)
-    val_data = val_dataset.filter(clean)
-    test_data = test_dataset.filter(clean)
+    print(f"Dataset sizes: Train: {len(train_raw)} | Val: {len(val_raw)}")
 
-    print("Datasets cleaned.")
-    print(f"Dataset sizes: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
+    print("Training Tokenizers (BPE)...")
+    src_tokenizer = FastBPETokenizer(vocab_size)
+    tgt_tokenizer = FastBPETokenizer(vocab_size)
 
-    print("Building tokenizers...")
-    all_src = [item['translation']['de'] for item in train_data]
-    all_tgt = [item['translation']['en'] for item in train_data]
+    def get_texts(ds, lang):
+        for i in range(len(ds)):
+            yield ds[i]['translation'][lang]
 
-    src_tokenizer = Tokenizer()
-    tgt_tokenizer = Tokenizer()
-    src_tokenizer.build_vocab(all_src)
-    tgt_tokenizer.build_vocab(all_tgt)
+    src_tokenizer.train(get_texts(train_raw, 'de'))
+    tgt_tokenizer.train(get_texts(train_raw, 'en'))
 
-    print(f"Vocab sizes: src={len(src_tokenizer.word2idx)}, tgt={len(tgt_tokenizer.word2idx)}")
-
-    print("Creating datasets...")
-    train_ds = Dataset(train_data, src_tokenizer, tgt_tokenizer, max_len)
-    val_ds = Dataset(val_data, src_tokenizer, tgt_tokenizer, max_len)
-    test_ds = Dataset(test_data, src_tokenizer, tgt_tokenizer, max_len)
-
-    print(f"Dataset sizes: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}")
+    print("Creating Tensors (Pre-tokenizing)...")
+    train_ds = PreTokenizedDataset(train_raw, src_tokenizer, tgt_tokenizer, max_len)
+    val_ds = PreTokenizedDataset(val_raw, src_tokenizer, tgt_tokenizer, max_len)
+    test_ds = PreTokenizedDataset(test_raw, src_tokenizer, tgt_tokenizer, max_len)
 
     # DataLoaders
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True, 
+        num_workers=4, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=batch_size, shuffle=False, 
+        num_workers=4, pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False
+    )
 
     return train_loader, val_loader, test_loader, src_tokenizer, tgt_tokenizer
 
 
 if __name__ == "__main__":
-    train_loader, val_loader, test_loader, src_tokenizer, tgt_tokenizer = get_dataloaders()
-
+    train_loader, _, _, src_tok, tgt_tok = get_dataloaders(batch_size=4)
     batch = next(iter(train_loader))
-    print("\n✅ SUCCESS! Tokenization works:")
-    print(f"src shape: {batch['src'].shape}")
-    print(f"tgt_input shape: {batch['tgt_input'].shape}")
-    print(f"tgt_output shape: {batch['tgt_output'].shape}")
-
-    print("\nExample batch:")
-    print("German:", src_tokenizer.decode(batch['src'][0]))
-    print("English input:", tgt_tokenizer.decode(batch['tgt_input'][0]))
-
+    print("\n✅ Data Pipeline Verified")
+    print(f"Batch keys: {batch.keys()}")
+    print(f"Source Shape: {batch['src'].shape}")
+    print(f"Example Source: {src_tok.decode(batch['src'][0])}")
