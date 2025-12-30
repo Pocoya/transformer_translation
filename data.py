@@ -138,12 +138,3 @@ def get_dataloaders(batch_size=256, max_len=80, vocab_size=32000):
     )
 
     return train_loader, val_loader, test_loader, src_tokenizer, tgt_tokenizer
-
-
-if __name__ == "__main__":
-    train_loader, _, _, src_tok, tgt_tok = get_dataloaders(batch_size=4)
-    batch = next(iter(train_loader))
-    print("\n✅ Data Pipeline Verified")
-    print(f"Batch keys: {batch.keys()}")
-    print(f"Source Shape: {batch['src'].shape}")
-    print(f"Example Source: {src_tok.decode(batch['src'][0])}")
