@@ -97,12 +97,12 @@ class PreTokenizedDataset(Dataset):
             'tgt_output': tgt[1:]
         }
 
-def get_dataloaders(batch_size=256, max_len=80, vocab_size=16000):
+def get_dataloaders(batch_size=256, max_len=80, vocab_size=32000):
     print("Loading WMT14 dataset...")
     raw_dataset = load_dataset("wmt/wmt14", "de-en")
-    
-    print("Filtering 500k samples...")
-    train_raw = raw_dataset["train"].select(range(500_000)).filter(clean_logic)
+
+    print("Filtering 1M samples...")
+    train_raw = raw_dataset["train"].select(range(1000000)).filter(clean_logic)
     val_raw = raw_dataset['validation'].filter(clean_logic)
     test_raw = raw_dataset['test'].select(range(2000)).filter(clean_logic)
 

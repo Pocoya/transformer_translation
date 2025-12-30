@@ -1,21 +1,24 @@
 training:
-  epochs: 20
-  batch_size: 256
-  learning_rate: 0.0004
+  epochs: 15
+  batch_size: 128
+  accumulation_steps: 2
+  learning_rate: 0.0005
   weight_decay: 0.1
   grad_clip: 1.0
   warmup_steps: 2000
-  save_every: 2 
-  label_smoothing: 0.15
+  save_every: 1 
+  label_smoothing: 0.1
+  early_stopping_patience: 3
   use_amp: true
+  resume_from: ""
   
 model:
-  src_vocab_size: 16000
-  tgt_vocab_size: 16000
+  src_vocab_size: 32000
+  tgt_vocab_size: 32000
   d_model: 512
   n_heads: 8
   n_layers: 6
-  dropout: 0.3
+  dropout: 0.2
   d_ff: 2048
   
 logging:
