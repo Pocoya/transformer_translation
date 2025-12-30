@@ -13,7 +13,8 @@ A high-performance German-to-English translation model based on the **Transforme
 - `data.py`: BPE tokenization, data cleaning, and pre-tokenized Dataset/DataLoader.
 - `config.yaml`: Configuration for hyperparameters and training.
 - `model.py`: Transformer architecture.
-- `train.py`: Training logic.
+- `train.py`: Training logic and eval.
+- `translate.py`: Translation.
 
 
 ## Quick Start
